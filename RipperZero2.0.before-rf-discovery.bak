@@ -1,0 +1,3097 @@
+#include <lvgl.h>
+#include <Arduino_GFX_Library.h>
+#include "TCA9554.h"
+#include "TouchDrvFT6X36.hpp"
+
+// ============================================================
+// DISPLAY / TOUCH PINS
+// ============================================================
+
+#define GFX_BL 6
+
+#define SPI_MISO 2
+#define SPI_MOSI 1
+#define SPI_SCLK 5
+
+#define LCD_CS  -1
+#define LCD_DC   3
+#define LCD_RST -1
+
+#define LCD_HOR_RES 320
+#define LCD_VER_RES 480
+
+#define I2C_SDA 8
+#define I2C_SCL 7
+
+
+// ============================================================
+// COLORS
+// ============================================================
+
+#define COLOR_BG        0x05070A
+#define COLOR_PANEL     0x0B1018
+#define COLOR_PANEL2    0x101722
+#define COLOR_TEXT      0xE8EEF5
+#define COLOR_MUTED     0x8C98A8
+
+#define COLOR_RF        0x00BFFF
+#define COLOR_IR        0xFF3B30
+#define COLOR_SAVED     0xA855F7
+#define COLOR_SETTINGS  0xFF9500
+#define COLOR_READY     0x55E85A
+
+#define COLOR_GREEN     0x55E85A
+#define COLOR_RED       0xFF3B30
+
+
+// ============================================================
+// HARDWARE OBJECTS
+// ============================================================
+
+TCA9554 TCA(0x20);
+
+Arduino_DataBus *bus = new Arduino_ESP32SPI(
+  LCD_DC,
+  LCD_CS,
+  SPI_SCLK,
+  SPI_MOSI,
+  SPI_MISO
+);
+
+Arduino_GFX *gfx = new Arduino_ST7796(
+  bus,
+  LCD_RST,
+  0,
+  true,
+  LCD_HOR_RES,
+  LCD_VER_RES
+);
+
+TouchDrvFT6X36 touch;
+
+
+// ============================================================
+// LVGL VARIABLES
+// ============================================================
+
+uint32_t screenWidth;
+uint32_t screenHeight;
+uint32_t bufSize;
+
+lv_disp_draw_buf_t draw_buf;
+
+lv_color_t *disp_draw_buf1;
+lv_color_t *disp_draw_buf2;
+
+lv_disp_drv_t disp_drv;
+
+
+// ============================================================
+// SCREEN VARIABLES
+// ============================================================
+
+lv_obj_t *home_screen;
+
+lv_obj_t *rf_screen;
+lv_obj_t *rf_universal_screen;
+lv_obj_t *rf_known_screen;
+
+lv_obj_t *device_type_screen;
+lv_obj_t *known_capture_screen;
+
+lv_obj_t *universal_remote_screen;
+lv_obj_t *universal_capture_screen;
+
+lv_obj_t *ir_screen;
+lv_obj_t *saved_screen;
+lv_obj_t *settings_screen;
+
+
+// ============================================================
+// STATUS INDICATOR
+// ============================================================
+
+lv_obj_t *status_label = NULL;
+lv_obj_t *status_dot = NULL;
+
+
+// ============================================================
+// UNIVERSAL REMOTE DATA
+// ============================================================
+
+#define MAX_UNIVERSAL_BUTTONS 12
+
+int universal_button_count = 0;
+
+char universal_button_names[MAX_UNIVERSAL_BUTTONS][20];
+
+
+// ============================================================
+// KNOWN DEVICE DATA
+// ============================================================
+
+#define MAX_KNOWN_STEPS 8
+
+const char *current_device_name = "";
+
+const char *current_steps[MAX_KNOWN_STEPS];
+
+int current_step_count = 0;
+int current_step_index = 0;
+
+lv_obj_t *known_instruction_label = NULL;
+lv_obj_t *known_progress_label = NULL;
+
+
+// ============================================================
+// DISPLAY FLUSH
+// ============================================================
+
+void my_disp_flush(
+  lv_disp_drv_t *disp_drv,
+  const lv_area_t *area,
+  lv_color_t *color_p
+) {
+
+  uint32_t w =
+    area->x2 - area->x1 + 1;
+
+  uint32_t h =
+    area->y2 - area->y1 + 1;
+
+
+  gfx->draw16bitRGBBitmap(
+    area->x1,
+    area->y1,
+    (uint16_t *)&color_p->full,
+    w,
+    h
+  );
+
+
+  lv_disp_flush_ready(
+    disp_drv
+  );
+}
+
+
+// ============================================================
+// TOUCH READ
+// ============================================================
+
+void my_touchpad_read(
+  lv_indev_drv_t *indev_drv,
+  lv_indev_data_t *data
+) {
+
+  int16_t x[1];
+  int16_t y[1];
+
+  uint8_t touched =
+    touch.getPoint(
+      x,
+      y,
+      1
+    );
+
+
+  if (touched) {
+
+    data->state =
+      LV_INDEV_STATE_PR;
+
+    data->point.x =
+      x[0];
+
+    data->point.y =
+      y[0];
+
+  } else {
+
+    data->state =
+      LV_INDEV_STATE_REL;
+  }
+}
+
+
+// ============================================================
+// LCD RESET
+// ============================================================
+
+void lcd_reset() {
+
+  TCA.write1(
+    1,
+    1
+  );
+
+  delay(10);
+
+
+  TCA.write1(
+    1,
+    0
+  );
+
+  delay(10);
+
+
+  TCA.write1(
+    1,
+    1
+  );
+
+  delay(200);
+}
+
+
+// ============================================================
+// STATUS FUNCTIONS
+// ============================================================
+
+void set_status(
+  const char *text,
+  uint32_t color
+) {
+
+  if (status_label != NULL) {
+
+    lv_label_set_text(
+      status_label,
+      text
+    );
+
+    lv_obj_set_style_text_color(
+      status_label,
+      lv_color_hex(color),
+      LV_PART_MAIN
+    );
+  }
+
+
+  if (status_dot != NULL) {
+
+    lv_obj_set_style_bg_color(
+      status_dot,
+      lv_color_hex(color),
+      LV_PART_MAIN
+    );
+  }
+}
+
+
+// ============================================================
+// SCREEN NAVIGATION
+// ============================================================
+
+void go_home(
+  lv_event_t *e
+) {
+
+  lv_scr_load(
+    home_screen
+  );
+
+  set_status(
+    "SYSTEM READY",
+    COLOR_READY
+  );
+}
+
+
+void open_rf(
+  lv_event_t *e
+) {
+
+  lv_scr_load(
+    rf_screen
+  );
+
+  set_status(
+    "RF READY",
+    COLOR_RF
+  );
+}
+
+
+void open_ir(
+  lv_event_t *e
+) {
+
+  lv_scr_load(
+    ir_screen
+  );
+
+  set_status(
+    "IR READY",
+    COLOR_IR
+  );
+}
+
+
+void open_saved(
+  lv_event_t *e
+) {
+
+  lv_scr_load(
+    saved_screen
+  );
+
+  set_status(
+    "LOADING SAVED",
+    COLOR_SAVED
+  );
+}
+
+
+void open_settings(
+  lv_event_t *e
+) {
+
+  lv_scr_load(
+    settings_screen
+  );
+
+  set_status(
+    "SYSTEM SETTINGS",
+    COLOR_SETTINGS
+  );
+}
+
+
+// ============================================================
+// CREATE BUTTON HELPER
+// ============================================================
+
+lv_obj_t *create_button(
+  lv_obj_t *parent,
+  int x,
+  int y,
+  int width,
+  int height,
+  const char *text,
+  uint32_t accent_color,
+  lv_event_cb_t event_cb
+) {
+
+  lv_obj_t *button =
+    lv_btn_create(parent);
+
+
+  lv_obj_set_size(
+    button,
+    width,
+    height
+  );
+
+
+  lv_obj_set_pos(
+    button,
+    x,
+    y
+  );
+
+
+  lv_obj_set_style_pad_all(
+    button,
+    0,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    button,
+    lv_color_hex(COLOR_PANEL),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    button,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_width(
+    button,
+    2,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_color(
+    button,
+    lv_color_hex(accent_color),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_radius(
+    button,
+    12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    button,
+    lv_color_hex(COLOR_PANEL2),
+    LV_STATE_PRESSED
+  );
+
+
+  if (event_cb != NULL) {
+
+    lv_obj_add_event_cb(
+      button,
+      event_cb,
+      LV_EVENT_CLICKED,
+      NULL
+    );
+  }
+
+
+  lv_obj_t *label =
+    lv_label_create(button);
+
+
+  lv_label_set_text(
+    label,
+    text
+  );
+
+
+  lv_obj_set_style_text_color(
+    label,
+    lv_color_hex(COLOR_TEXT),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    label,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_center(
+    label
+  );
+
+
+  return button;
+}
+
+
+// ============================================================
+// CREATE HOME CARD
+// ============================================================
+
+lv_obj_t *create_home_card(
+  lv_obj_t *parent,
+  int x,
+  int y,
+  int width,
+  int height,
+  const char *symbol,
+  const char *title,
+  const char *subtitle,
+  uint32_t accent_color,
+  lv_event_cb_t event_cb
+) {
+
+  lv_obj_t *card =
+    lv_btn_create(parent);
+
+
+  lv_obj_set_size(
+    card,
+    width,
+    height
+  );
+
+
+  lv_obj_set_pos(
+    card,
+    x,
+    y
+  );
+
+
+  lv_obj_set_style_pad_all(
+    card,
+    0,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    card,
+    lv_color_hex(COLOR_PANEL),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    card,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_width(
+    card,
+    2,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_color(
+    card,
+    lv_color_hex(accent_color),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_radius(
+    card,
+    14,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_shadow_width(
+    card,
+    8,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_shadow_color(
+    card,
+    lv_color_hex(accent_color),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_shadow_opa(
+    card,
+    LV_OPA_30,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    card,
+    lv_color_hex(COLOR_PANEL2),
+    LV_STATE_PRESSED
+  );
+
+
+  lv_obj_set_style_shadow_width(
+    card,
+    3,
+    LV_STATE_PRESSED
+  );
+
+
+  lv_obj_add_event_cb(
+    card,
+    event_cb,
+    LV_EVENT_CLICKED,
+    NULL
+  );
+
+
+  // ICON
+
+  lv_obj_t *icon =
+    lv_label_create(card);
+
+
+  lv_label_set_text(
+    icon,
+    symbol
+  );
+
+
+  lv_obj_set_style_text_color(
+    icon,
+    lv_color_hex(accent_color),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    icon,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    icon,
+    LV_ALIGN_TOP_MID,
+    0,
+    12
+  );
+
+
+  // TITLE
+
+  lv_obj_t *label =
+    lv_label_create(card);
+
+
+  lv_label_set_text(
+    label,
+    title
+  );
+
+
+  lv_obj_set_style_text_color(
+    label,
+    lv_color_hex(COLOR_TEXT),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    label,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    label,
+    LV_ALIGN_CENTER,
+    0,
+    2
+  );
+
+
+  // SUBTITLE
+
+  lv_obj_t *sub =
+    lv_label_create(card);
+
+
+  lv_label_set_text(
+    sub,
+    subtitle
+  );
+
+
+  lv_obj_set_style_text_color(
+    sub,
+    lv_color_hex(accent_color),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    sub,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    sub,
+    LV_ALIGN_BOTTOM_MID,
+    0,
+    -12
+  );
+
+
+  return card;
+}
+
+
+// ============================================================
+// CREATE HEADER
+// ============================================================
+
+void create_header(
+  lv_obj_t *parent,
+  const char *title
+) {
+
+  lv_obj_t *header =
+    lv_obj_create(parent);
+
+
+  lv_obj_set_size(
+    header,
+    296,
+    52
+  );
+
+
+  lv_obj_align(
+    header,
+    LV_ALIGN_TOP_MID,
+    0,
+    10
+  );
+
+
+  lv_obj_set_style_pad_all(
+    header,
+    0,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    header,
+    lv_color_hex(COLOR_PANEL),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    header,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_width(
+    header,
+    1,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_color(
+    header,
+    lv_color_hex(0x344152),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_radius(
+    header,
+    12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_t *title_label =
+    lv_label_create(header);
+
+
+  lv_label_set_text(
+    title_label,
+    title
+  );
+
+
+  lv_obj_set_style_text_color(
+    title_label,
+    lv_color_hex(COLOR_TEXT),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    title_label,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_center(
+    title_label
+  );
+
+
+  // STATUS DOT
+
+  status_dot =
+    lv_obj_create(parent);
+
+
+  lv_obj_set_size(
+    status_dot,
+    7,
+    7
+  );
+
+
+  lv_obj_set_style_radius(
+    status_dot,
+    LV_RADIUS_CIRCLE,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    status_dot,
+    lv_color_hex(COLOR_READY),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    status_dot,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_width(
+    status_dot,
+    0,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    status_dot,
+    LV_ALIGN_TOP_LEFT,
+    18,
+    72
+  );
+
+
+  // STATUS TEXT
+
+  status_label =
+    lv_label_create(parent);
+
+
+  lv_label_set_text(
+    status_label,
+    "SYSTEM READY"
+  );
+
+
+  lv_obj_set_style_text_color(
+    status_label,
+    lv_color_hex(COLOR_READY),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    status_label,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    status_label,
+    LV_ALIGN_TOP_LEFT,
+    32,
+    66
+  );
+}
+
+
+// ============================================================
+// CREATE FOOTER
+// ============================================================
+
+void create_footer(
+  lv_obj_t *parent
+) {
+
+  lv_obj_t *footer =
+    lv_obj_create(parent);
+
+
+  lv_obj_set_size(
+    footer,
+    296,
+    38
+  );
+
+
+  lv_obj_align(
+    footer,
+    LV_ALIGN_BOTTOM_MID,
+    0,
+    -8
+  );
+
+
+  lv_obj_set_style_pad_all(
+    footer,
+    0,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    footer,
+    lv_color_hex(COLOR_PANEL),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    footer,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_width(
+    footer,
+    1,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_color(
+    footer,
+    lv_color_hex(0x283545),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_radius(
+    footer,
+    10,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_t *left =
+    lv_label_create(footer);
+
+
+  lv_label_set_text(
+    left,
+    "ESP32-S3"
+  );
+
+
+  lv_obj_set_style_text_color(
+    left,
+    lv_color_hex(COLOR_RF),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    left,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    left,
+    LV_ALIGN_LEFT_MID,
+    10,
+    0
+  );
+
+
+  lv_obj_t *right =
+    lv_label_create(footer);
+
+
+  lv_label_set_text(
+    right,
+    "v0.1"
+  );
+
+
+  lv_obj_set_style_text_color(
+    right,
+    lv_color_hex(COLOR_MUTED),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    right,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    right,
+    LV_ALIGN_RIGHT_MID,
+    -10,
+    0
+  );
+}
+
+
+// ============================================================
+// GENERIC SECONDARY PAGE
+// ============================================================
+
+lv_obj_t *create_page(
+  const char *title,
+  const char *description,
+  uint32_t accent_color
+) {
+
+  lv_obj_t *screen =
+    lv_obj_create(NULL);
+
+
+  lv_obj_set_style_bg_color(
+    screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  create_header(
+    screen,
+    title
+  );
+
+
+  lv_obj_t *panel =
+    lv_obj_create(screen);
+
+
+  lv_obj_set_size(
+    panel,
+    280,
+    220
+  );
+
+
+  lv_obj_align(
+    panel,
+    LV_ALIGN_CENTER,
+    0,
+    15
+  );
+
+
+  lv_obj_set_style_pad_all(
+    panel,
+    0,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    panel,
+    lv_color_hex(COLOR_PANEL),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    panel,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_width(
+    panel,
+    2,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_color(
+    panel,
+    lv_color_hex(accent_color),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_radius(
+    panel,
+    16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_t *description_label =
+    lv_label_create(panel);
+
+
+  lv_label_set_text(
+    description_label,
+    description
+  );
+
+
+  lv_obj_set_style_text_color(
+    description_label,
+    lv_color_hex(COLOR_MUTED),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    description_label,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    description_label,
+    LV_ALIGN_TOP_MID,
+    0,
+    25
+  );
+
+
+  lv_obj_t *coming =
+    lv_label_create(panel);
+
+
+  lv_label_set_text(
+    coming,
+    "COMING SOON"
+  );
+
+
+  lv_obj_set_style_text_color(
+    coming,
+    lv_color_hex(accent_color),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    coming,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    coming,
+    LV_ALIGN_CENTER,
+    0,
+    0
+  );
+
+
+  lv_obj_t *home_btn =
+    create_button(
+      panel,
+      55,
+      150,
+      170,
+      48,
+      "<  HOME",
+      accent_color,
+      go_home
+    );
+
+
+  create_footer(
+    screen
+  );
+
+
+  return screen;
+}
+
+
+// ============================================================
+// RF MAIN SCREEN EVENTS
+// ============================================================
+
+void open_universal(
+  lv_event_t *e
+) {
+
+  lv_scr_load(
+    rf_universal_screen
+  );
+
+  set_status(
+    "UNIVERSAL MODE",
+    COLOR_RF
+  );
+}
+
+
+void open_known(
+  lv_event_t *e
+) {
+
+  lv_scr_load(
+    rf_known_screen
+  );
+
+  set_status(
+    "KNOWN DEVICE MODE",
+    COLOR_RF
+  );
+}
+
+
+// ============================================================
+// CREATE RF MAIN SCREEN
+// ============================================================
+
+void create_rf_screen() {
+
+  rf_screen =
+    lv_obj_create(NULL);
+
+
+  lv_obj_set_style_bg_color(
+    rf_screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    rf_screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  create_header(
+    rf_screen,
+    "RF TOOLS"
+  );
+
+
+  // UNIVERSAL / UNKNOWN
+
+  lv_obj_t *universal =
+    lv_btn_create(rf_screen);
+
+
+  lv_obj_set_size(
+    universal,
+    280,
+    105
+  );
+
+
+  lv_obj_set_pos(
+    universal,
+    20,
+    105
+  );
+
+
+  lv_obj_set_style_pad_all(
+    universal,
+    0,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    universal,
+    lv_color_hex(COLOR_PANEL),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    universal,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_width(
+    universal,
+    2,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_color(
+    universal,
+    lv_color_hex(COLOR_RF),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_radius(
+    universal,
+    16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_add_event_cb(
+    universal,
+    open_universal,
+    LV_EVENT_CLICKED,
+    NULL
+  );
+
+
+  lv_obj_t *u_title =
+    lv_label_create(universal);
+
+
+  lv_label_set_text(
+    u_title,
+    "UNIVERSAL / UNKNOWN"
+  );
+
+
+  lv_obj_set_style_text_color(
+    u_title,
+    lv_color_hex(COLOR_TEXT),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    u_title,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    u_title,
+    LV_ALIGN_TOP_MID,
+    0,
+    18
+  );
+
+
+  lv_obj_t *u_sub =
+    lv_label_create(universal);
+
+
+  lv_label_set_text(
+    u_sub,
+    "Build a remote from any RF signals"
+  );
+
+
+  lv_obj_set_style_text_color(
+    u_sub,
+    lv_color_hex(COLOR_RF),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    u_sub,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    u_sub,
+    LV_ALIGN_BOTTOM_MID,
+    0,
+    -18
+  );
+
+
+  // KNOWN DEVICES
+
+  lv_obj_t *known =
+    lv_btn_create(rf_screen);
+
+
+  lv_obj_set_size(
+    known,
+    280,
+    105
+  );
+
+
+  lv_obj_set_pos(
+    known,
+    20,
+    230
+  );
+
+
+  lv_obj_set_style_pad_all(
+    known,
+    0,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_color(
+    known,
+    lv_color_hex(COLOR_PANEL),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    known,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_width(
+    known,
+    2,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_border_color(
+    known,
+    lv_color_hex(COLOR_GREEN),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_radius(
+    known,
+    16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_add_event_cb(
+    known,
+    open_known,
+    LV_EVENT_CLICKED,
+    NULL
+  );
+
+
+  lv_obj_t *k_title =
+    lv_label_create(known);
+
+
+  lv_label_set_text(
+    k_title,
+    "KNOWN DEVICES"
+  );
+
+
+  lv_obj_set_style_text_color(
+    k_title,
+    lv_color_hex(COLOR_TEXT),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    k_title,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    k_title,
+    LV_ALIGN_TOP_MID,
+    0,
+    18
+  );
+
+
+  lv_obj_t *k_sub =
+    lv_label_create(known);
+
+
+  lv_label_set_text(
+    k_sub,
+    "Guided setup for common remotes"
+  );
+
+
+  lv_obj_set_style_text_color(
+    k_sub,
+    lv_color_hex(COLOR_GREEN),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    k_sub,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    k_sub,
+    LV_ALIGN_BOTTOM_MID,
+    0,
+    -18
+  );
+
+
+  create_button(
+    rf_screen,
+    80,
+    355,
+    160,
+    42,
+    "<  HOME",
+    COLOR_RF,
+    go_home
+  );
+
+
+  create_footer(
+    rf_screen
+  );
+}
+
+
+// ============================================================
+// UNIVERSAL REMOTE FUNCTIONS
+// ============================================================
+
+void open_universal_remote(
+  lv_event_t *e
+);
+
+void refresh_universal_remote();
+
+
+// ============================================================
+// ADD UNIVERSAL BUTTON
+// ============================================================
+
+void add_universal_button(
+  lv_event_t *e
+) {
+
+  if (
+    universal_button_count >=
+    MAX_UNIVERSAL_BUTTONS
+  ) {
+
+    set_status(
+      "REMOTE FULL",
+      COLOR_RED
+    );
+
+    return;
+  }
+
+
+  lv_scr_load(
+    universal_capture_screen
+  );
+
+
+  set_status(
+    "LISTENING",
+    COLOR_RF
+  );
+}
+
+
+// ============================================================
+// SIMULATE CAPTURE
+// ============================================================
+
+void finish_universal_capture(
+  lv_event_t *e
+) {
+
+  if (
+    universal_button_count <
+    MAX_UNIVERSAL_BUTTONS
+  ) {
+
+    snprintf(
+      universal_button_names[
+        universal_button_count
+      ],
+      sizeof(
+        universal_button_names[0]
+      ),
+      "BUTTON %d",
+      universal_button_count + 1
+    );
+
+
+    universal_button_count++;
+  }
+
+
+  refresh_universal_remote();
+
+
+  lv_scr_load(
+    universal_remote_screen
+  );
+
+
+  set_status(
+    "SIGNAL CAPTURED",
+    COLOR_GREEN
+  );
+}
+
+
+// ============================================================
+// CREATE UNIVERSAL CAPTURE SCREEN
+// ============================================================
+
+void create_universal_capture_screen() {
+
+  universal_capture_screen =
+    lv_obj_create(NULL);
+
+
+  lv_obj_set_style_bg_color(
+    universal_capture_screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    universal_capture_screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  create_header(
+    universal_capture_screen,
+    "CAPTURE SIGNAL"
+  );
+
+
+  lv_obj_t *instruction =
+    lv_label_create(
+      universal_capture_screen
+    );
+
+
+  lv_label_set_text(
+    instruction,
+    "Press a button on the\noriginal remote"
+  );
+
+
+  lv_obj_set_style_text_color(
+    instruction,
+    lv_color_hex(COLOR_TEXT),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    instruction,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_align(
+    instruction,
+    LV_TEXT_ALIGN_CENTER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    instruction,
+    LV_ALIGN_TOP_MID,
+    0,
+    145
+  );
+
+
+  lv_obj_t *listening =
+    lv_label_create(
+      universal_capture_screen
+    );
+
+
+  lv_label_set_text(
+    listening,
+    "LISTENING..."
+  );
+
+
+  lv_obj_set_style_text_color(
+    listening,
+    lv_color_hex(COLOR_RF),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    listening,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    listening,
+    LV_ALIGN_CENTER,
+    0,
+    35
+  );
+
+
+  create_button(
+    universal_capture_screen,
+    55,
+    310,
+    210,
+    48,
+    "SIMULATE CAPTURE",
+    COLOR_GREEN,
+    finish_universal_capture
+  );
+
+
+  create_button(
+    universal_capture_screen,
+    55,
+    370,
+    210,
+    40,
+    "CANCEL",
+    COLOR_RED,
+    open_universal_remote
+  );
+
+
+  create_footer(
+    universal_capture_screen
+  );
+}
+
+
+// ============================================================
+// REFRESH UNIVERSAL REMOTE
+// ============================================================
+
+void refresh_universal_remote() {
+
+  if (
+    universal_remote_screen == NULL
+  ) {
+    return;
+  }
+
+
+  lv_obj_clean(
+    universal_remote_screen
+  );
+
+
+  create_header(
+    universal_remote_screen,
+    "UNKNOWN REMOTE"
+  );
+
+
+  int y =
+    105;
+
+
+  for (
+    int i = 0;
+    i < universal_button_count;
+    i++
+  ) {
+
+    create_button(
+      universal_remote_screen,
+      35,
+      y,
+      250,
+      38,
+      universal_button_names[i],
+      COLOR_RF,
+      NULL
+    );
+
+
+    y += 45;
+  }
+
+
+  if (
+    universal_button_count <
+    MAX_UNIVERSAL_BUTTONS
+  ) {
+
+    create_button(
+      universal_remote_screen,
+      55,
+      y,
+      210,
+      45,
+      "+ ADD BUTTON",
+      COLOR_GREEN,
+      add_universal_button
+    );
+
+  } else {
+
+    create_button(
+      universal_remote_screen,
+      55,
+      y,
+      210,
+      45,
+      "REMOTE FULL",
+      COLOR_RED,
+      NULL
+    );
+  }
+
+
+  create_button(
+    universal_remote_screen,
+    55,
+    370,
+    100,
+    40,
+    "RF MENU",
+    COLOR_RF,
+    open_rf
+  );
+
+
+  create_button(
+    universal_remote_screen,
+    165,
+    370,
+    100,
+    40,
+    "HOME",
+    COLOR_RF,
+    go_home
+  );
+
+
+  create_footer(
+    universal_remote_screen
+  );
+}
+
+
+// ============================================================
+// CREATE UNIVERSAL SCREEN
+// ============================================================
+
+void create_universal_screen() {
+
+  rf_universal_screen =
+    lv_obj_create(NULL);
+
+
+  lv_obj_set_style_bg_color(
+    rf_universal_screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    rf_universal_screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  create_header(
+    rf_universal_screen,
+    "UNIVERSAL / UNKNOWN"
+  );
+
+
+  lv_obj_t *info =
+    lv_label_create(
+      rf_universal_screen
+    );
+
+
+  lv_label_set_text(
+    info,
+    "Capture any unknown RF signals\nand build your own remote."
+  );
+
+
+  lv_obj_set_style_text_color(
+    info,
+    lv_color_hex(COLOR_MUTED),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    info,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_align(
+    info,
+    LV_TEXT_ALIGN_CENTER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    info,
+    LV_ALIGN_TOP_MID,
+    0,
+    125
+  );
+
+
+  create_button(
+    rf_universal_screen,
+    50,
+    210,
+    220,
+    58,
+    "CREATE / OPEN REMOTE",
+    COLOR_RF,
+    open_universal_remote
+  );
+
+
+  create_button(
+    rf_universal_screen,
+    50,
+    285,
+    220,
+    48,
+    "BACK TO RF MENU",
+    COLOR_RF,
+    open_rf
+  );
+
+
+  create_footer(
+    rf_universal_screen
+  );
+}
+
+
+// ============================================================
+// OPEN UNIVERSAL REMOTE
+// ============================================================
+
+void open_universal_remote(
+  lv_event_t *e
+) {
+
+  refresh_universal_remote();
+
+
+  lv_scr_load(
+    universal_remote_screen
+  );
+
+
+  set_status(
+    "UNKNOWN REMOTE",
+    COLOR_RF
+  );
+}
+
+
+// ============================================================
+// KNOWN DEVICE SETUP
+// ============================================================
+
+void load_tv_steps() {
+
+  current_device_name =
+    "TV";
+
+
+  current_steps[0] =
+    "POWER";
+
+  current_steps[1] =
+    "VOLUME UP";
+
+  current_steps[2] =
+    "VOLUME DOWN";
+
+  current_steps[3] =
+    "CHANNEL UP";
+
+  current_steps[4] =
+    "CHANNEL DOWN";
+
+  current_steps[5] =
+    "MUTE";
+
+
+  current_step_count =
+    6;
+
+  current_step_index =
+    0;
+}
+
+
+void load_fan_steps() {
+
+  current_device_name =
+    "FAN";
+
+
+  current_steps[0] =
+    "POWER";
+
+  current_steps[1] =
+    "SPEED UP";
+
+  current_steps[2] =
+    "SPEED DOWN";
+
+  current_steps[3] =
+    "OSCILLATE";
+
+  current_steps[4] =
+    "LIGHT";
+
+
+  current_step_count =
+    5;
+
+  current_step_index =
+    0;
+}
+
+
+void load_light_steps() {
+
+  current_device_name =
+    "LIGHT";
+
+
+  current_steps[0] =
+    "POWER";
+
+  current_steps[1] =
+    "BRIGHTER";
+
+  current_steps[2] =
+    "DIMMER";
+
+  current_steps[3] =
+    "MODE";
+
+
+  current_step_count =
+    4;
+
+  current_step_index =
+    0;
+}
+
+
+void load_garage_steps() {
+
+  current_device_name =
+    "GARAGE / GATE";
+
+
+  current_steps[0] =
+    "OPEN";
+
+  current_steps[1] =
+    "CLOSE";
+
+  current_steps[2] =
+    "STOP";
+
+
+  current_step_count =
+    3;
+
+  current_step_index =
+    0;
+}
+
+
+// ============================================================
+// UPDATE KNOWN CAPTURE SCREEN
+// ============================================================
+
+void update_known_capture_screen() {
+
+  if (
+    known_instruction_label == NULL ||
+    known_progress_label == NULL
+  ) {
+    return;
+  }
+
+
+  if (
+    current_step_index >=
+    current_step_count
+  ) {
+
+    lv_label_set_text(
+      known_instruction_label,
+      "SETUP COMPLETE"
+    );
+
+
+    lv_label_set_text(
+      known_progress_label,
+      "Remote learning finished"
+    );
+
+
+    set_status(
+      "SETUP COMPLETE",
+      COLOR_GREEN
+    );
+
+
+    return;
+  }
+
+
+  char instruction[80];
+
+  snprintf(
+    instruction,
+    sizeof(instruction),
+    "Press %s on the\noriginal remote",
+    current_steps[
+      current_step_index
+    ]
+  );
+
+
+  lv_label_set_text(
+    known_instruction_label,
+    instruction
+  );
+
+
+  char progress[40];
+
+  snprintf(
+    progress,
+    sizeof(progress),
+    "%d / %d",
+    current_step_index + 1,
+    current_step_count
+  );
+
+
+  lv_label_set_text(
+    known_progress_label,
+    progress
+  );
+}
+
+
+// ============================================================
+// CAPTURE KNOWN STEP
+// ============================================================
+
+void capture_known_step(
+  lv_event_t *e
+) {
+
+  current_step_index++;
+
+
+  set_status(
+    "SIGNAL CAPTURED",
+    COLOR_GREEN
+  );
+
+
+  update_known_capture_screen();
+}
+
+
+// ============================================================
+// SKIP KNOWN STEP
+// ============================================================
+
+void skip_known_step(
+  lv_event_t *e
+) {
+
+  current_step_index++;
+
+
+  set_status(
+    "SKIPPED",
+    COLOR_MUTED
+  );
+
+
+  update_known_capture_screen();
+}
+
+
+// ============================================================
+// DEVICE TYPE EVENTS
+// ============================================================
+
+void open_tv_setup(
+  lv_event_t *e
+) {
+
+  load_tv_steps();
+
+  update_known_capture_screen();
+
+  lv_scr_load(
+    known_capture_screen
+  );
+
+  set_status(
+    "TV SETUP",
+    COLOR_RF
+  );
+}
+
+
+void open_fan_setup(
+  lv_event_t *e
+) {
+
+  load_fan_steps();
+
+  update_known_capture_screen();
+
+  lv_scr_load(
+    known_capture_screen
+  );
+
+  set_status(
+    "FAN SETUP",
+    COLOR_RF
+  );
+}
+
+
+void open_light_setup(
+  lv_event_t *e
+) {
+
+  load_light_steps();
+
+  update_known_capture_screen();
+
+  lv_scr_load(
+    known_capture_screen
+  );
+
+  set_status(
+    "LIGHT SETUP",
+    COLOR_RF
+  );
+}
+
+
+void open_garage_setup(
+  lv_event_t *e
+) {
+
+  load_garage_steps();
+
+  update_known_capture_screen();
+
+  lv_scr_load(
+    known_capture_screen
+  );
+
+  set_status(
+    "GATE SETUP",
+    COLOR_RF
+  );
+}
+
+
+// ============================================================
+// CREATE KNOWN CAPTURE SCREEN
+// ============================================================
+
+void create_known_capture_screen() {
+
+  known_capture_screen =
+    lv_obj_create(NULL);
+
+
+  lv_obj_set_style_bg_color(
+    known_capture_screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    known_capture_screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  create_header(
+    known_capture_screen,
+    "GUIDED LEARNING"
+  );
+
+
+  known_progress_label =
+    lv_label_create(
+      known_capture_screen
+    );
+
+
+  lv_label_set_text(
+    known_progress_label,
+    "1 / 1"
+  );
+
+
+  lv_obj_set_style_text_color(
+    known_progress_label,
+    lv_color_hex(COLOR_RF),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    known_progress_label,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    known_progress_label,
+    LV_ALIGN_TOP_RIGHT,
+    -25,
+    78
+  );
+
+
+  known_instruction_label =
+    lv_label_create(
+      known_capture_screen
+    );
+
+
+  lv_label_set_text(
+    known_instruction_label,
+    "SELECT A DEVICE"
+  );
+
+
+  lv_obj_set_style_text_color(
+    known_instruction_label,
+    lv_color_hex(COLOR_TEXT),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    known_instruction_label,
+    &lv_font_montserrat_16,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_align(
+    known_instruction_label,
+    LV_TEXT_ALIGN_CENTER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    known_instruction_label,
+    LV_ALIGN_TOP_MID,
+    0,
+    140
+  );
+
+
+  create_button(
+    known_capture_screen,
+    55,
+    250,
+    210,
+    48,
+    "SIMULATE CAPTURE",
+    COLOR_GREEN,
+    capture_known_step
+  );
+
+
+  create_button(
+    known_capture_screen,
+    55,
+    310,
+    210,
+    48,
+    "SKIP THIS FEATURE",
+    COLOR_SETTINGS,
+    skip_known_step
+  );
+
+
+  create_button(
+    known_capture_screen,
+    55,
+    370,
+    210,
+    40,
+    "CANCEL",
+    COLOR_RED,
+    open_known
+  );
+
+
+  create_footer(
+    known_capture_screen
+  );
+}
+
+
+// ============================================================
+// CREATE DEVICE TYPE SCREEN
+// ============================================================
+
+void create_device_type_screen() {
+
+  device_type_screen =
+    lv_obj_create(NULL);
+
+
+  lv_obj_set_style_bg_color(
+    device_type_screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    device_type_screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  create_header(
+    device_type_screen,
+    "SELECT DEVICE"
+  );
+
+
+  create_button(
+    device_type_screen,
+    25,
+    105,
+    130,
+    55,
+    "TV",
+    COLOR_RF,
+    open_tv_setup
+  );
+
+
+  create_button(
+    device_type_screen,
+    165,
+    105,
+    130,
+    55,
+    "FAN",
+    COLOR_GREEN,
+    open_fan_setup
+  );
+
+
+  create_button(
+    device_type_screen,
+    25,
+    175,
+    130,
+    55,
+    "LIGHT",
+    COLOR_SETTINGS,
+    open_light_setup
+  );
+
+
+  create_button(
+    device_type_screen,
+    165,
+    175,
+    130,
+    55,
+    "GARAGE / GATE",
+    COLOR_SAVED,
+    open_garage_setup
+  );
+
+
+  create_button(
+    device_type_screen,
+    25,
+    245,
+    270,
+    50,
+    "CUSTOM",
+    COLOR_MUTED,
+    NULL
+  );
+
+
+  create_button(
+    device_type_screen,
+    70,
+    320,
+    180,
+    45,
+    "BACK",
+    COLOR_RF,
+    open_known
+  );
+
+
+  create_footer(
+    device_type_screen
+  );
+}
+
+
+// ============================================================
+// OPEN DEVICE TYPE SCREEN
+// ============================================================
+
+void open_device_types(
+  lv_event_t *e
+) {
+
+  lv_scr_load(
+    device_type_screen
+  );
+
+
+  set_status(
+    "SELECT DEVICE",
+    COLOR_RF
+  );
+}
+
+
+// ============================================================
+// CREATE KNOWN DEVICES SCREEN
+// ============================================================
+
+void create_known_screen() {
+
+  rf_known_screen =
+    lv_obj_create(NULL);
+
+
+  lv_obj_set_style_bg_color(
+    rf_known_screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    rf_known_screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  create_header(
+    rf_known_screen,
+    "KNOWN DEVICES"
+  );
+
+
+  lv_obj_t *info =
+    lv_label_create(
+      rf_known_screen
+    );
+
+
+  lv_label_set_text(
+    info,
+    "Choose a device type and RipperZero\nwill guide you through each control."
+  );
+
+
+  lv_obj_set_style_text_color(
+    info,
+    lv_color_hex(COLOR_MUTED),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_font(
+    info,
+    &lv_font_montserrat_12,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_text_align(
+    info,
+    LV_TEXT_ALIGN_CENTER,
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_align(
+    info,
+    LV_ALIGN_TOP_MID,
+    0,
+    125
+  );
+
+
+  create_button(
+    rf_known_screen,
+    50,
+    215,
+    220,
+    58,
+    "SELECT DEVICE",
+    COLOR_GREEN,
+    open_device_types
+  );
+
+
+  create_button(
+    rf_known_screen,
+    50,
+    290,
+    220,
+    48,
+    "BACK TO RF MENU",
+    COLOR_RF,
+    open_rf
+  );
+
+
+  create_footer(
+    rf_known_screen
+  );
+}
+
+
+// ============================================================
+// CREATE HOME SCREEN
+// ============================================================
+
+void create_home_screen() {
+
+  home_screen =
+    lv_obj_create(NULL);
+
+
+  lv_obj_set_style_bg_color(
+    home_screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+
+  lv_obj_set_style_bg_opa(
+    home_screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+
+  create_header(
+    home_screen,
+    "Nick's RipperZero"
+  );
+
+
+  create_home_card(
+    home_screen,
+    22,
+    105,
+    130,
+    125,
+    "RF",
+    "RF TOOLS",
+    "SIGNAL",
+    COLOR_RF,
+    open_rf
+  );
+
+
+  create_home_card(
+    home_screen,
+    168,
+    105,
+    130,
+    125,
+    "IR",
+    "IR REMOTE",
+    "CONTROL",
+    COLOR_IR,
+    open_ir
+  );
+
+
+  create_home_card(
+    home_screen,
+    22,
+    245,
+    130,
+    125,
+    "+",
+    "SAVED",
+    "FILES",
+    COLOR_SAVED,
+    open_saved
+  );
+
+
+  create_home_card(
+    home_screen,
+    168,
+    245,
+    130,
+    125,
+    "*",
+    "SETTINGS",
+    "SYSTEM",
+    COLOR_SETTINGS,
+    open_settings
+  );
+
+
+  create_footer(
+    home_screen
+  );
+}
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+  Serial.begin(
+    115200
+  );
+
+  Serial.println();
+  Serial.println(
+    "Starting Nick's RipperZero..."
+  );
+
+
+  // START I2C
+
+  Wire.begin(
+    I2C_SDA,
+    I2C_SCL
+  );
+
+
+  // START TCA9554
+
+  TCA.begin();
+
+  TCA.pinMode1(
+    1,
+    OUTPUT
+  );
+
+  lcd_reset();
+
+
+  // START TOUCH
+
+  if (
+    !touch.begin(
+      Wire,
+      FT6X36_SLAVE_ADDRESS
+    )
+  ) {
+
+    Serial.println(
+      "Failed to find FT6X36 - check wiring!"
+    );
+
+    while (1) {
+      delay(1000);
+    }
+  }
+
+
+  Serial.println(
+    "Touch initialized"
+  );
+
+
+  // START DISPLAY
+
+  if (!gfx->begin()) {
+
+    Serial.println(
+      "gfx->begin() failed!"
+    );
+
+  } else {
+
+    Serial.println(
+      "Display initialized"
+    );
+  }
+
+
+  gfx->fillScreen(
+    RGB565_BLACK
+  );
+
+
+  // BACKLIGHT
+
+  pinMode(
+    GFX_BL,
+    OUTPUT
+  );
+
+  digitalWrite(
+    GFX_BL,
+    HIGH
+  );
+
+
+  // START LVGL
+
+  lv_init();
+
+
+  screenWidth =
+    gfx->width();
+
+  screenHeight =
+    gfx->height();
+
+
+  // BUFFER = 120 LINES
+
+  bufSize =
+    screenWidth * 120;
+
+
+  disp_draw_buf1 =
+    (lv_color_t *)heap_caps_malloc(
+      bufSize * sizeof(lv_color_t),
+      MALLOC_CAP_DEFAULT |
+      MALLOC_CAP_8BIT
+    );
+
+
+  disp_draw_buf2 =
+    (lv_color_t *)heap_caps_malloc(
+      bufSize * sizeof(lv_color_t),
+      MALLOC_CAP_DEFAULT |
+      MALLOC_CAP_8BIT
+    );
+
+
+  if (
+    !disp_draw_buf1 ||
+    !disp_draw_buf2
+  ) {
+
+    Serial.println(
+      "ERROR: LVGL buffer allocation failed!"
+    );
+
+    while (1) {
+      delay(1000);
+    }
+  }
+
+
+  lv_disp_draw_buf_init(
+    &draw_buf,
+    disp_draw_buf1,
+    disp_draw_buf2,
+    bufSize
+  );
+
+
+  // REGISTER DISPLAY
+
+  lv_disp_drv_init(
+    &disp_drv
+  );
+
+
+  disp_drv.hor_res =
+    screenWidth;
+
+  disp_drv.ver_res =
+    screenHeight;
+
+  disp_drv.flush_cb =
+    my_disp_flush;
+
+  disp_drv.draw_buf =
+    &draw_buf;
+
+
+  lv_disp_drv_register(
+    &disp_drv
+  );
+
+
+  // REGISTER TOUCH
+
+  static lv_indev_drv_t indev_drv;
+
+
+  lv_indev_drv_init(
+    &indev_drv
+  );
+
+
+  indev_drv.type =
+    LV_INDEV_TYPE_POINTER;
+
+  indev_drv.read_cb =
+    my_touchpad_read;
+
+
+  lv_indev_drv_register(
+    &indev_drv
+  );
+
+
+  // ==========================================================
+  // CREATE ALL SCREENS
+  // ==========================================================
+
+  create_home_screen();
+
+  create_rf_screen();
+
+  create_universal_screen();
+
+  universal_remote_screen =
+    lv_obj_create(NULL);
+
+  lv_obj_set_style_bg_color(
+    universal_remote_screen,
+    lv_color_hex(COLOR_BG),
+    LV_PART_MAIN
+  );
+
+  lv_obj_set_style_bg_opa(
+    universal_remote_screen,
+    LV_OPA_COVER,
+    LV_PART_MAIN
+  );
+
+  create_universal_capture_screen();
+
+  create_known_screen();
+
+  create_device_type_screen();
+
+  create_known_capture_screen();
+
+
+  // OTHER MAIN MENU SCREENS
+
+  ir_screen =
+    create_page(
+      "IR REMOTE",
+      "Control and learn infrared devices",
+      COLOR_IR
+    );
+
+
+  saved_screen =
+    create_page(
+      "SAVED",
+      "Stored signals, remotes and data",
+      COLOR_SAVED
+    );
+
+
+  settings_screen =
+    create_page(
+      "SETTINGS",
+      "System and display configuration",
+      COLOR_SETTINGS
+    );
+
+
+  // BUILD EMPTY UNIVERSAL REMOTE
+
+  refresh_universal_remote();
+
+
+  // LOAD HOME SCREEN
+
+  lv_scr_load(
+    home_screen
+  );
+
+
+  set_status(
+    "SYSTEM READY",
+    COLOR_READY
+  );
+
+
+  Serial.println(
+    "Nick's RipperZero ready!"
+  );
+}
+
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop() {
+
+  lv_timer_handler();
+
+  delay(5);
+}
